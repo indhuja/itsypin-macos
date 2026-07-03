@@ -7,6 +7,10 @@ class HotkeyManager {
     private var hotkeys: [UInt32: (id: EventHotKeyID, ref: EventHotKeyRef?, site: PinnedSite)] = [:]
     private var nextId: UInt32 = 1
 
+    // Fixed ⌃⌥P shortcut for the post composer, kept apart from site hotkeys
+    private static let composerHotkeyId: UInt32 = 0xC0DE
+    private var composerHotkeyRef: EventHotKeyRef?
+
     // Triple-tap tracking
     private var modifierPressTimestamps: [String: [Date]] = [:]
     private let tripleTapWindow: TimeInterval = 0.5
@@ -48,6 +52,10 @@ class HotkeyManager {
     }
 
     private func handleHotkey(id: UInt32) {
+        if id == Self.composerHotkeyId {
+            DispatchQueue.main.async { ComposerWindowController.shared.toggle() }
+            return
+        }
         guard let hotkey = hotkeys[id] else { return }
         DispatchQueue.main.async {
             if let delegate = NSApp.delegate as? AppDelegate {
@@ -91,7 +99,21 @@ class HotkeyManager {
         nextId = 1
     }
 
+    private func registerComposerHotkey() {
+        guard composerHotkeyRef == nil else { return }
+        let hotkeyID = EventHotKeyID(signature: OSType(0x4954_5359), id: Self.composerHotkeyId)
+        RegisterEventHotKey(
+            UInt32(kVK_ANSI_P),
+            UInt32(controlKey | optionKey),
+            hotkeyID,
+            GetApplicationEventTarget(),
+            0,
+            &composerHotkeyRef
+        )
+    }
+
     func reregisterAll() {
+        registerComposerHotkey()
         unregisterAll()
         for site in SettingsStore.shared.pinnedSites {
             register(site: site)

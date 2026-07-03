@@ -37,11 +37,36 @@ class SettingsStore: ObservableObject {
         }
     }
 
+    /// Where the bubble dock sits along its edge: 0 is the bottom or left end, 1 the top or right.
+    private(set) var bubbleDockPosition: Double = 0.5
+
+    /// Saves where the dock was dropped. Only notifies when the edge changed,
+    /// since the dock is already showing the new position.
+    func setBubbleDock(edge: BubbleEdge, position: Double) {
+        bubbleDockPosition = position
+        UserDefaults.standard.set(position, forKey: bubbleDockPositionKey)
+        if edge != preferredBubbleEdge {
+            preferredBubbleEdge = edge
+        }
+    }
+
     @Published var showBubblePreviews: Bool = false {
         didSet {
             UserDefaults.standard.set(showBubblePreviews, forKey: bubblePreviewsKey)
             NotificationCenter.default.post(name: .bubbleSettingsChanged, object: nil)
         }
+    }
+
+    /// Light or dark for the dock, bubbles, pages and settings; system follows macOS.
+    @Published var appearance: AppAppearance = .system {
+        didSet {
+            UserDefaults.standard.set(appearance.rawValue, forKey: appearanceKey)
+            applyAppearance()
+        }
+    }
+
+    func applyAppearance() {
+        NSApp?.appearance = appearance.nsAppearance
     }
 
     @Published var showBubbleBackground: Bool = false {
@@ -65,16 +90,42 @@ class SettingsStore: ObservableObject {
         }
     }
 
+    /// Red count badges on collapsed bubbles, read from each page's title.
+    @Published var showUnreadBadges: Bool = true {
+        didSet {
+            UserDefaults.standard.set(showUnreadBadges, forKey: unreadBadgesKey)
+            NotificationCenter.default.post(name: .bubbleSettingsChanged, object: nil)
+        }
+    }
+
+    /// Also post a macOS notification when a bubble's unread count rises.
+    @Published var notifyOnNewUnread: Bool = false {
+        didSet {
+            UserDefaults.standard.set(notifyOnNewUnread, forKey: notifyUnreadKey)
+        }
+    }
+
     private let sitesKey = "pinnedSites"
+    private let unreadBadgesKey = "showUnreadBadges"
+    private let notifyUnreadKey = "notifyOnNewUnread"
     private let bubbleEdgeKey = "preferredBubbleEdge"
+    private let bubbleDockPositionKey = "bubbleDockPosition"
     private let bubblePreviewsKey = "showBubblePreviews"
     private let bubbleBackgroundKey = "showBubbleBackground"
+    private let appearanceKey = "appearance"
     private let bubbleSizeKey = "bubbleSize"
     private let bubbleUnloadKey = "bubbleUnloadMinutes"
 
     private init() {
         loadSites()
         loadBubbleEdge()
+        if let raw = UserDefaults.standard.string(forKey: appearanceKey),
+           let saved = AppAppearance(rawValue: raw) {
+            appearance = saved
+        }
+        if UserDefaults.standard.object(forKey: bubbleDockPositionKey) != nil {
+            bubbleDockPosition = UserDefaults.standard.double(forKey: bubbleDockPositionKey)
+        }
         loadBubblePreviews()
         if UserDefaults.standard.object(forKey: bubbleBackgroundKey) != nil {
             showBubbleBackground = UserDefaults.standard.bool(forKey: bubbleBackgroundKey)
@@ -83,6 +134,10 @@ class SettingsStore: ObservableObject {
             bubbleSize = UserDefaults.standard.double(forKey: bubbleSizeKey)
         }
         bubbleUnloadMinutes = UserDefaults.standard.integer(forKey: bubbleUnloadKey)
+        if UserDefaults.standard.object(forKey: unreadBadgesKey) != nil {
+            showUnreadBadges = UserDefaults.standard.bool(forKey: unreadBadgesKey)
+        }
+        notifyOnNewUnread = UserDefaults.standard.bool(forKey: notifyUnreadKey)
         syncLaunchAtLoginStatus()
 
         if pinnedSites.isEmpty {

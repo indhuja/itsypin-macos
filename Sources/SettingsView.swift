@@ -12,13 +12,23 @@ struct SettingsView: View {
             Form {
                 Section {
                     Toggle("Open at login", isOn: $store.launchAtLogin)
+                    Picker("Appearance", selection: $store.appearance) {
+                        Text("System").tag(AppAppearance.system)
+                        Text("Light").tag(AppAppearance.light)
+                        Text("Dark").tag(AppAppearance.dark)
+                    }
                 }
+
+                PostingSettingsSection()
 
                 Section("Floating bubbles") {
                     Picker("Screen edge", selection: $store.preferredBubbleEdge) {
                         Text("Right").tag(BubbleEdge.right)
+                        Text("Left").tag(BubbleEdge.left)
+                        Text("Top").tag(BubbleEdge.top)
                         Text("Bottom").tag(BubbleEdge.bottom)
                     }
+                    .help("Or drag the dock by its grip to any edge")
                     Toggle("Show page previews", isOn: $store.showBubblePreviews)
                         .help("When off, bubbles show site favicon instead")
                     Toggle("Show bubble background", isOn: $store.showBubbleBackground)
@@ -34,6 +44,14 @@ struct SettingsView: View {
                         Text("30 minutes").tag(30)
                     }
                     .help("Frees memory by unloading collapsed bubble pages after inactivity")
+                    .disabled(store.showUnreadBadges)
+                    Toggle("Show unread badges", isOn: $store.showUnreadBadges)
+                        .help("Counts new notifications on collapsed bubbles. Keeps their pages loaded, so pages aren't unloaded while this is on.")
+                    Toggle("Notify when unread count rises", isOn: $store.notifyOnNewUnread)
+                        .disabled(!store.showUnreadBadges)
+                        .onChange(of: store.notifyOnNewUnread) { on in
+                            if on { BubbleManager.shared.requestNotificationPermission() }
+                        }
                 }
 
                 Section {
@@ -485,6 +503,68 @@ class ShortcutRecorderNSView: NSView {
     deinit {
         if let monitor = monitor {
             NSEvent.removeMonitor(monitor)
+        }
+    }
+}
+
+// MARK: - Posting
+
+struct PostingSettingsSection: View {
+    @ObservedObject private var store = SettingsStore.shared
+    @ObservedObject private var drafts = DraftStore.shared
+
+    private var missingPlatforms: [Platform] {
+        Platform.allCases.filter { platform in
+            !store.pinnedSites.contains { platform.matches($0.url) }
+        }
+    }
+
+    var body: some View {
+        Section("Posting") {
+            HStack {
+                Text("Drafts folder")
+                Spacer()
+                Text(drafts.folderPath)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Button("Choose…", action: chooseFolder)
+            }
+            .help("Pick a folder inside your Obsidian vault so drafts show up there")
+
+            HStack {
+                Text("Composer shortcut")
+                Spacer()
+                Text("⌃⌥P")
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Button("Open") { ComposerWindowController.shared.show() }
+            }
+
+            if !missingPlatforms.isEmpty {
+                HStack {
+                    Text("Quick add")
+                    Spacer()
+                    ForEach(missingPlatforms) { platform in
+                        Button(platform.name) {
+                            store.addSite(PinnedSite(name: platform.name, url: platform.homeURL, displayMode: .bubble))
+                        }
+                    }
+                }
+                .help("Adds the site as a floating bubble")
+            }
+        }
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Use Folder"
+        panel.message = "Choose where drafts are saved, for example a Posts folder in your Obsidian vault."
+        if panel.runModal() == .OK, let url = panel.url {
+            drafts.folderPath = (url.path as NSString).abbreviatingWithTildeInPath
         }
     }
 }
