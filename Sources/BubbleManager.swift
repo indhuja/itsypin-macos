@@ -1,4 +1,5 @@
 import Cocoa
+import UserNotifications
 
 class BubbleManager {
     static let shared = BubbleManager()
@@ -57,41 +58,25 @@ class BubbleManager {
         }
 
         // Create or update bubbles for bubble-mode sites
-        let edge = SettingsStore.shared.preferredBubbleEdge
-        var nextPosition: CGFloat = 0.1
-
         for site in bubbleSites {
             if let existingWindow = bubbleWindows[site.id] {
                 existingWindow.updateSite(site)
-                let position = site.bubblePosition ?? nextPosition
-                existingWindow.positionOnEdge(edge: edge, position: position)
                 if site.hotCorner == nil {
                     existingWindow.orderFront(nil)
                 } else if !existingWindow.isExpanded {
                     existingWindow.orderOut(nil)
                 }
             } else {
-                // Create new bubble; hot corner bubbles stay hidden until triggered
-                let position = site.bubblePosition ?? nextPosition
+                // Hot corner bubbles stay hidden until triggered
                 let bubble = BubbleWindow(site: site)
-                bubble.positionOnEdge(edge: edge, position: position)
+                bubbleWindows[site.id] = bubble
                 if site.hotCorner == nil {
                     bubble.orderFront(nil)
                 }
-                bubbleWindows[site.id] = bubble
-
-                // Save auto-assigned position if not set
-                if site.bubblePosition == nil {
-                    SettingsStore.shared.updateBubblePosition(id: site.id, position: position)
-                }
-            }
-
-            nextPosition += 0.15
-            if nextPosition > 0.9 {
-                nextPosition = 0.1
             }
         }
 
+        layoutDock()
         updateHotCornerMonitor()
     }
 
@@ -139,14 +124,140 @@ class BubbleManager {
     }
 
     private func repositionAllBubbles() {
-        let edge = SettingsStore.shared.preferredBubbleEdge
+        layoutDock()
+    }
 
-        for (id, window) in bubbleWindows {
-            if let site = SettingsStore.shared.pinnedSites.first(where: { $0.id == id }) {
-                let position = site.bubblePosition ?? 0.5
-                window.positionOnEdge(edge: edge, position: position)
-            }
+    // MARK: - Dock
+
+    private lazy var dockWindow: BubbleDockWindow = {
+        let dock = BubbleDockWindow()
+        dock.onGripDrag = { [weak self] mouse in self?.dragDock(to: mouse) }
+        dock.onGripDrop = { [weak self] in self?.dropDock() }
+        return dock
+    }()
+    private var dockEdge = SettingsStore.shared.preferredBubbleEdge
+    private var dockPosition = CGFloat(SettingsStore.shared.bubbleDockPosition)
+
+    /// Bubbles in the dock, in settings order (hot corner bubbles live in their corner).
+    private var dockedBubbles: [BubbleWindow] {
+        SettingsStore.shared.pinnedSites.compactMap { site in
+            guard site.hotCorner == nil else { return nil }
+            return bubbleWindows[site.id]
         }
+    }
+
+    private struct DockMetrics {
+        let thickness: CGFloat
+        let flare: CGFloat
+        let gripLength: CGFloat
+        let inset: CGFloat
+        let length: CGFloat
+
+        init(count: Int) {
+            thickness = BubbleWindow.collapsedSize.width
+            flare = round(thickness * 1.2)
+            gripLength = round(thickness * 0.6)
+            // Bubbles start a little way into the end curves
+            inset = round(flare * 0.75)
+            length = CGFloat(count) * thickness + gripLength + inset * 2
+        }
+    }
+
+    private func layoutDock() {
+        let edge = SettingsStore.shared.preferredBubbleEdge
+        layoutDock(edge: edge, position: CGFloat(SettingsStore.shared.bubbleDockPosition))
+    }
+
+    /// Places the dock on `edge`, `position` of the way along it, and puts
+    /// each bubble in its slot.
+    private func layoutDock(edge: BubbleEdge, position: CGFloat) {
+        dockEdge = edge
+        dockPosition = position
+        for bubble in bubbleWindows.values where bubble.site.hotCorner != nil {
+            bubble.placeInCorner()
+        }
+        let bubbles = dockedBubbles
+        guard !bubbles.isEmpty, let screen = NSScreen.main else {
+            dockWindow.orderOut(nil)
+            return
+        }
+
+        let m = DockMetrics(count: bubbles.count)
+        let visible = screen.visibleFrame
+        let frame: NSRect
+        if edge.isVertical {
+            let y = visible.minY + max(0, visible.height - m.length) * position
+            let x = edge == .right ? visible.maxX - m.thickness : visible.minX
+            frame = NSRect(x: x, y: y, width: m.thickness, height: m.length)
+        } else {
+            let x = visible.minX + max(0, visible.width - m.length) * position
+            let y = edge == .top ? visible.maxY - m.thickness : visible.minY
+            frame = NSRect(x: x, y: y, width: m.length, height: m.thickness)
+        }
+        let dockFrame = NSIntegralRect(frame)
+
+        // Top to bottom with the grip last when vertical; left to right when horizontal
+        let gripRect: NSRect
+        if edge.isVertical {
+            gripRect = NSRect(x: 0, y: m.inset, width: m.thickness, height: m.gripLength)
+        } else {
+            gripRect = NSRect(x: m.inset + CGFloat(bubbles.count) * m.thickness, y: 0, width: m.gripLength, height: m.thickness)
+        }
+        dockWindow.apply(frame: dockFrame, layout: BubbleDockLayout(
+            edge: edge, thickness: m.thickness, flare: m.flare, gripRect: gripRect
+        ))
+        dockWindow.orderFront(nil)
+
+        for (index, bubble) in bubbles.enumerated() {
+            let slot: NSRect
+            if edge.isVertical {
+                let top = dockFrame.maxY - m.inset - CGFloat(index) * m.thickness
+                slot = NSRect(x: dockFrame.minX, y: top - m.thickness, width: m.thickness, height: m.thickness)
+            } else {
+                let left = dockFrame.minX + m.inset + CGFloat(index) * m.thickness
+                slot = NSRect(x: left, y: dockFrame.minY, width: m.thickness, height: m.thickness)
+            }
+            bubble.dock(in: slot, edge: edge)
+        }
+    }
+
+    /// Follows the mouse, snapping to whichever edge is nearest and keeping
+    /// the grip under the pointer.
+    private func dragDock(to mouse: NSPoint) {
+        guard let screen = NSScreen.main, !dockedBubbles.isEmpty else { return }
+        let visible = screen.visibleFrame
+        let distances: [(BubbleEdge, CGFloat)] = [
+            (.left, abs(mouse.x - visible.minX)),
+            (.right, abs(visible.maxX - mouse.x)),
+            (.bottom, abs(mouse.y - visible.minY)),
+            (.top, abs(visible.maxY - mouse.y)),
+        ]
+        let edge = distances.min { $0.1 < $1.1 }!.0
+
+        let m = DockMetrics(count: dockedBubbles.count)
+        let gripCenter: CGFloat
+        let along: CGFloat
+        let span: CGFloat
+        if edge.isVertical {
+            gripCenter = m.inset + m.gripLength / 2
+            along = mouse.y - visible.minY
+            span = visible.height - m.length
+        } else {
+            gripCenter = m.length - m.inset - m.gripLength / 2
+            along = mouse.x - visible.minX
+            span = visible.width - m.length
+        }
+        let position = span > 0 ? max(0, min(1, (along - gripCenter) / span)) : 0.5
+        layoutDock(edge: edge, position: position)
+    }
+
+    private func dropDock() {
+        SettingsStore.shared.setBubbleDock(edge: dockEdge, position: Double(dockPosition))
+    }
+
+    func hasPinnedBubble(except bubble: BubbleWindow) -> Bool {
+        guard let expanded = expandedBubble, expanded !== bubble else { return false }
+        return expanded.isExpanded && expanded.isPinned
     }
 
     func willExpandBubble(_ bubble: BubbleWindow) {
@@ -165,6 +276,14 @@ class BubbleManager {
         bubbleWindows[siteId]?.collapse()
     }
 
+    /// Returns false when the site has no bubble (menu bar sites).
+    @discardableResult
+    func openCompose(_ url: URL, for siteId: UUID) -> Bool {
+        guard let bubble = bubbleWindows[siteId] else { return false }
+        bubble.openCompose(url)
+        return true
+    }
+
     func toggleBubble(for siteId: UUID) {
         guard let bubble = bubbleWindows[siteId] else { return }
 
@@ -177,6 +296,30 @@ class BubbleManager {
 
     func isBubbleExpanded(for siteId: UUID) -> Bool {
         return bubbleWindows[siteId]?.isExpanded ?? false
+    }
+
+    // MARK: - Unread notifications
+
+    func requestNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+            badgeLog.notice("notification permission granted=\(granted) error=\(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Posts a macOS notification when a bubble's unread count goes up.
+    func notifyUnreadRose(site: PinnedSite, count: Int) {
+        guard SettingsStore.shared.notifyOnNewUnread else { return }
+        let content = UNMutableNotificationContent()
+        content.title = site.name
+        content.body = count == 1 ? "1 unread notification" : "\(count) unread notifications"
+        content.sound = .default
+        // One notification per site, replaced as the count changes
+        let request = UNNotificationRequest(identifier: "unread-\(site.id.uuidString)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                badgeLog.error("notification failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     func bubbleDidCollapse(_ bubble: BubbleWindow) {

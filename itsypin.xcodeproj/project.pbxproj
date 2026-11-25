@@ -3,14 +3,16 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 54;
+	objectVersion = 77;
 	objects = {
 
 /* Begin PBXBuildFile section */
 		05E60C650478DE83581C069F /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = C34609BC96EB261AEE164E7D /* main.swift */; };
 		07A96CE5E14A341D96752A5D /* BubbleContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1232F0107ADB5C9938E712A3 /* BubbleContentView.swift */; };
+		1C64009A880301BF83295CB6 /* Posting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 272D465C739DCED9365B8C9B /* Posting.swift */; };
 		1EE65C1C6FA3B7FCD03A5018 /* BubbleWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74F4C93CBC24E085F976EF03 /* BubbleWindow.swift */; };
 		2286367A15F07492F16ECFB7 /* SettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD75C35DBE3FD1F5D74AB87E /* SettingsStore.swift */; };
+		2C64AA33E1F0EF8BED6F471A /* BubbleDockWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E3B34D8A8A35C66C056B780 /* BubbleDockWindow.swift */; };
 		43CE829BE850FE0F99E9A8F4 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 12D452880712CED61D4CDE21 /* Assets.xcassets */; };
 		569000E59A3766536C0E89F2 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00B3A9B717860F8730333F7 /* Models.swift */; };
 		653D015050203A7128B5E8A2 /* WebViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A809B860699AA08271F01E65 /* WebViewController.swift */; };
@@ -18,6 +20,7 @@
 		7E458EE86BB1FD766EC3E141 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B0BC9C576D5EB7A11B5760B /* SettingsView.swift */; };
 		8B1DD7EFD0ACB3CE01E440A1 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 847403246B7BA6BEB2CCC776 /* AppDelegate.swift */; };
 		91462F3575E2CF4FACB66C59 /* MenuBarIcon.png in Resources */ = {isa = PBXBuildFile; fileRef = BAD2972656A36145CCC185E5 /* MenuBarIcon.png */; };
+		98031D9D0B55EAAA6171EF74 /* ComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9C5B2252E7DF03820A54A40 /* ComposerView.swift */; };
 		A03D32FB352105BFC2E7AA2A /* FaviconLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76FFA25047D285CFC833B8C5 /* FaviconLoader.swift */; };
 		CCC5654EA769FE4864858B4C /* HotkeyManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EF19272D3B73BC283BA44BB /* HotkeyManager.swift */; };
 /* End PBXBuildFile section */
@@ -25,6 +28,8 @@
 /* Begin PBXFileReference section */
 		1232F0107ADB5C9938E712A3 /* BubbleContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BubbleContentView.swift; sourceTree = "<group>"; };
 		12D452880712CED61D4CDE21 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		272D465C739DCED9365B8C9B /* Posting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Posting.swift; sourceTree = "<group>"; };
+		2E3B34D8A8A35C66C056B780 /* BubbleDockWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BubbleDockWindow.swift; sourceTree = "<group>"; };
 		36927FAC7FA44AC7F99337D4 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		6EF19272D3B73BC283BA44BB /* HotkeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotkeyManager.swift; sourceTree = "<group>"; };
 		74F4C93CBC24E085F976EF03 /* BubbleWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BubbleWindow.swift; sourceTree = "<group>"; };
@@ -37,6 +42,7 @@
 		C34609BC96EB261AEE164E7D /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		D302BA8715EFEE75FA752207 /* BubbleManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BubbleManager.swift; sourceTree = "<group>"; };
 		F00B3A9B717860F8730333F7 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		F9C5B2252E7DF03820A54A40 /* ComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerView.swift; sourceTree = "<group>"; };
 		FD75C35DBE3FD1F5D74AB87E /* SettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -55,13 +61,16 @@
 			children = (
 				847403246B7BA6BEB2CCC776 /* AppDelegate.swift */,
 				1232F0107ADB5C9938E712A3 /* BubbleContentView.swift */,
+				2E3B34D8A8A35C66C056B780 /* BubbleDockWindow.swift */,
 				D302BA8715EFEE75FA752207 /* BubbleManager.swift */,
 				74F4C93CBC24E085F976EF03 /* BubbleWindow.swift */,
+				F9C5B2252E7DF03820A54A40 /* ComposerView.swift */,
 				76FFA25047D285CFC833B8C5 /* FaviconLoader.swift */,
 				6EF19272D3B73BC283BA44BB /* HotkeyManager.swift */,
 				36927FAC7FA44AC7F99337D4 /* Info.plist */,
 				C34609BC96EB261AEE164E7D /* main.swift */,
 				F00B3A9B717860F8730333F7 /* Models.swift */,
+				272D465C739DCED9365B8C9B /* Posting.swift */,
 				FD75C35DBE3FD1F5D74AB87E /* SettingsStore.swift */,
 				7B0BC9C576D5EB7A11B5760B /* SettingsView.swift */,
 				A809B860699AA08271F01E65 /* WebViewController.swift */,
@@ -123,7 +132,6 @@
 				};
 			};
 			buildConfigurationList = E86FD9D7173F995FDD6A723D /* Build configuration list for PBXProject "itsypin" */;
-			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -132,7 +140,8 @@
 			);
 			mainGroup = 35EB1B2D78116D40D984783F;
 			minimizedProjectReferenceProxies = 1;
-			preferredProjectObjectVersion = 54;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = CB64BDB9ADA9D83A1B7FFF8E /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -160,11 +169,14 @@
 			files = (
 				8B1DD7EFD0ACB3CE01E440A1 /* AppDelegate.swift in Sources */,
 				07A96CE5E14A341D96752A5D /* BubbleContentView.swift in Sources */,
+				2C64AA33E1F0EF8BED6F471A /* BubbleDockWindow.swift in Sources */,
 				7D74647B49E6A78D3FBEA4BF /* BubbleManager.swift in Sources */,
 				1EE65C1C6FA3B7FCD03A5018 /* BubbleWindow.swift in Sources */,
+				98031D9D0B55EAAA6171EF74 /* ComposerView.swift in Sources */,
 				A03D32FB352105BFC2E7AA2A /* FaviconLoader.swift in Sources */,
 				CCC5654EA769FE4864858B4C /* HotkeyManager.swift in Sources */,
 				569000E59A3766536C0E89F2 /* Models.swift in Sources */,
+				1C64009A880301BF83295CB6 /* Posting.swift in Sources */,
 				2286367A15F07492F16ECFB7 /* SettingsStore.swift in Sources */,
 				7E458EE86BB1FD766EC3E141 /* SettingsView.swift in Sources */,
 				653D015050203A7128B5E8A2 /* WebViewController.swift in Sources */,

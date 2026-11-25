@@ -11,10 +11,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var clickOutsideMonitor: Any?
     private var settingsWindow: NSWindow?
     private var defaultMenuBarIcon: NSImage?
+    /// While true, the menu bar popover stays open on outside clicks (typing or uploading).
+    private var popoverIsComposing = false {
+        didSet { popover?.behavior = popoverIsComposing ? .applicationDefined : .transient }
+    }
 
     // MARK: - App Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        SettingsStore.shared.applyAppearance()
         setupStatusItem()
         setupPopover()
         setupMainMenu()
@@ -24,6 +29,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
         // Show bubbles for bubble-mode sites
         BubbleManager.shared.showBubblesForSites()
+
+        // Debug aid: `open Itsypin.app --args --compose` opens the composer at launch
+        if ProcessInfo.processInfo.arguments.contains("--compose") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                ComposerWindowController.shared.show()
+            }
+        }
 
         NotificationCenter.default.addObserver(
             self,
@@ -105,6 +117,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             menu.addItem(.separator())
         }
 
+        let composeItem = NSMenuItem(title: "New Post…  ⌃⌥P", action: #selector(openComposer), keyEquivalent: "")
+        menu.addItem(composeItem)
+        menu.addItem(.separator())
+
         menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Itsypin", action: #selector(NSApplication.terminate(_:)), keyEquivalent: ""))
@@ -117,6 +133,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     @objc private func openSite(_ sender: NSMenuItem) {
         guard let site = sender.representedObject as? PinnedSite else { return }
         showPopover(for: site)
+    }
+
+    @objc func openComposer() {
+        popover.performClose(nil)
+        ComposerWindowController.shared.show()
+    }
+
+    /// Opens a compose link in the site's bubble, or its menu bar popover.
+    func openCompose(_ url: URL, in site: PinnedSite) {
+        if site.displayMode == .bubble, BubbleManager.shared.openCompose(url, for: site.id) {
+            return
+        }
+        if !(popover.isShown && currentSite?.id == site.id) {
+            showPopover(for: site)
+        }
+        webViewController(for: site).load(url)
+        popoverIsComposing = true
     }
 
     @objc private func openSettings() {
@@ -240,6 +273,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             self?.popover.contentSize = newSize
             SettingsStore.shared.updateSiteSize(id: site.id, size: newSize)
         }
+        controller.onComposeStateChanged = { [weak self] composing in
+            guard let self, self.currentSite?.id == site.id else { return }
+            self.popoverIsComposing = composing
+        }
+        controller.onFilePickerOpened = { [weak self] in
+            guard let self, self.currentSite?.id == site.id else { return }
+            self.popoverIsComposing = true
+        }
         controller.onFaviconLoaded = { [weak self] favicon in
             guard let self = self, self.currentSite?.id == site.id, self.popover.isShown,
                   self.currentSite?.customIcon == nil else { return }
@@ -260,13 +301,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func popoverDidClose(_ notification: Notification) {
+        popoverIsComposing = false
         stopClickOutsideMonitor()
         statusItem.button?.image = defaultMenuBarIcon
     }
 
     private func startClickOutsideMonitor() {
         clickOutsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            if self?.popover.isShown == true {
+            if self?.popover.isShown == true, self?.popoverIsComposing == false {
                 self?.popover.performClose(nil)
             }
         }

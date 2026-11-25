@@ -1,5 +1,8 @@
 import Cocoa
 import WebKit
+import os
+
+let composeLog = Logger(subsystem: "com.itsypin.app", category: "compose")
 
 class BubbleWindow: NSPanel {
     static var collapsedSize: NSSize {
@@ -14,8 +17,17 @@ class BubbleWindow: NSPanel {
     private(set) var site: PinnedSite
     private(set) var isExpanded = false
     private(set) var isPinned = false
+    /// Pinned by the app (typing, file picker, compose link) rather than by the user's pin button.
+    private var isAutoPinned = false
+    private var wakeObserver: NSObjectProtocol?
+    private var idleUnpinTimer: Timer?
+    /// An auto-pin lets go after this long without typing. Collapsing is safe:
+    /// the page stays loaded, so a half-written post is still there next hover.
+    private static let idleUnpinDelay: TimeInterval = 120
     private var isAnimating = false
-    private var currentPosition: CGFloat
+    /// The bubble's slot in the dock, and the edge the dock is on.
+    private var dockedFrame: NSRect?
+    private var dockEdge: BubbleEdge = .right
     private var snapshotImage: NSImage?
     private var faviconImage: NSImage?
     private var webViewController: WebViewController?
@@ -25,6 +37,7 @@ class BubbleWindow: NSPanel {
     private var globalMouseMonitor: Any?
     private var localMouseMonitor: Any?
     private var dragMonitor: Any?
+    private var keyMonitor: Any?
     private var collapseTimer: Timer?
     private var unloadTimer: Timer?
     private var resizeHandles: [ResizeHandleView] = []
@@ -32,8 +45,13 @@ class BubbleWindow: NSPanel {
 
     private var mouseDownLocation: NSPoint = .zero
     private var isDragging = false
-    private var dragStartPosition: CGFloat = 0
+    private var dragStartOrigin: NSPoint = .zero
     private var expandedWidth: CGFloat?
+    /// The page's latest unread count, and the count when the bubble was last
+    /// opened; the badge shows only once the count rises past what was seen.
+    private var unreadCount = 0
+    private var seenUnreadCount = 0
+    private var hasUnreadReading = false
     private var expandedHeight: CGFloat?
 
     override var canBecomeKey: Bool { true }
@@ -50,7 +68,6 @@ class BubbleWindow: NSPanel {
 
     init(site: PinnedSite) {
         self.site = site
-        self.currentPosition = site.bubblePosition ?? 0.5
 
         super.init(
             contentRect: NSRect(origin: .zero, size: BubbleWindow.collapsedSize),
@@ -79,6 +96,136 @@ class BubbleWindow: NSPanel {
 
         setupTrackingArea()
         loadInitialContent()
+        preloadPage()
+
+        // Pages can go stale or log out over sleep; refresh collapsed bubbles
+        // on wake so the next hover shows a ready page instead of a spinner
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, !self.isExpanded else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                guard !self.isExpanded else { return }
+                self.webViewController?.reloadIfIdle()
+            }
+        }
+    }
+
+    /// Loads the site off-screen at launch so the first hover never shows a loading page.
+    private func preloadPage() {
+        ensureWebViewController()
+        webViewController?.loadSite(site)
+        parkWebView()
+    }
+
+    /// Collapsed pages stay in the window so WebKit doesn't suspend them.
+    private func parkWebView() {
+        guard !isExpanded, let view = webViewController?.view else { return }
+        bubbleContentView.parkWebView(view, size: currentExpandedSize)
+    }
+
+    private func ensureWebViewController() {
+        guard webViewController == nil else { return }
+        let controller = WebViewController()
+        controller.onThemeColorDetected = { [weak self] color in
+            self?.bubbleContentView.titleBar?.updateBackgroundColor(color)
+        }
+        controller.onFaviconLoaded = { [weak self] icon in
+            guard let self, self.site.customIcon == nil, let icon else { return }
+            // The page's own favicon is more reliable than URL guessing
+            icon.size = NSSize(width: 32, height: 32)
+            self.faviconImage = icon
+        }
+        controller.onComposeStateChanged = { [weak self] composing in
+            self?.setComposing(composing)
+        }
+        controller.onFilePickerOpened = { [weak self] in
+            self?.setComposing(true)
+        }
+        controller.onUnreadCountChanged = { [weak self] count in
+            self?.setUnreadCount(count)
+        }
+        webViewController = controller
+    }
+
+    // MARK: - Unread badge
+
+    private func setUnreadCount(_ count: Int) {
+        let previous = unreadCount
+        unreadCount = count
+        // Read elsewhere (or on the page) — don't wait for it to climb back
+        seenUnreadCount = min(seenUnreadCount, count)
+        if isExpanded { seenUnreadCount = count }
+        badgeLog.notice("\(self.site.name, privacy: .public) unread=\(count) seen=\(self.seenUnreadCount) expanded=\(self.isExpanded)")
+        updateBadge()
+        // The first reading after launch is old news, not something new
+        defer { hasUnreadReading = true }
+        if hasUnreadReading, count > previous, !isExpanded, SettingsStore.shared.showUnreadBadges {
+            BubbleManager.shared.notifyUnreadRose(site: site, count: count)
+        }
+    }
+
+    private func updateBadge() {
+        let show = SettingsStore.shared.showUnreadBadges && !isExpanded && unreadCount > seenUnreadCount
+        bubbleContentView.setBadge(show ? unreadCount : 0)
+    }
+
+    // MARK: - Auto-pin
+
+    /// Keeps the bubble open while something is being written or uploaded.
+    /// Only releases a pin the app set itself; a pin from the pin button stays.
+    func setComposing(_ composing: Bool) {
+        composeLog.notice("\(self.site.name, privacy: .public) composing=\(composing) expanded=\(self.isExpanded) pinned=\(self.isPinned) auto=\(self.isAutoPinned)")
+        if composing {
+            guard isExpanded else { return }
+            if isAutoPinned { armIdleUnpin() }
+            guard !isPinned else { return }
+            isPinned = true
+            isAutoPinned = true
+            armIdleUnpin()
+        } else {
+            releaseAutoPin()
+            return
+        }
+        bubbleContentView.titleBar?.isPinned = isPinned
+    }
+
+    private func armIdleUnpin() {
+        idleUnpinTimer?.invalidate()
+        idleUnpinTimer = Timer.scheduledTimer(withTimeInterval: Self.idleUnpinDelay, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            composeLog.notice("\(self.site.name, privacy: .public) idle, releasing auto-pin")
+            self.releaseAutoPin()
+        }
+    }
+
+    /// Drops a pin the app set (never one from the pin button), then collapses
+    /// right away if the mouse has already left.
+    private func releaseAutoPin() {
+        idleUnpinTimer?.invalidate()
+        idleUnpinTimer = nil
+        guard isAutoPinned else { return }
+        isPinned = false
+        isAutoPinned = false
+        bubbleContentView.titleBar?.isPinned = false
+        checkMousePosition()
+    }
+
+    /// Opens a compose link (from the composer) in this bubble and keeps it open.
+    func openCompose(_ url: URL) {
+        orderFront(nil)
+        if isExpanded {
+            webViewController?.load(url)
+            setComposing(true)
+            activateAndFocus()
+            return
+        }
+        expand()
+        webViewController?.load(url)
+        // Pin before the mouse check starts, since the cursor is over the composer
+        isPinned = true
+        isAutoPinned = true
+        armIdleUnpin()
     }
 
     private func loadInitialContent() {
@@ -170,6 +317,7 @@ class BubbleWindow: NSPanel {
             webViewController?.loadSite(site)
         } else {
             webViewController = nil
+            preloadPage()
         }
     }
 
@@ -177,7 +325,11 @@ class BubbleWindow: NSPanel {
         hoverTimer?.invalidate()
         collapseTimer?.invalidate()
         unloadTimer?.invalidate()
+        idleUnpinTimer?.invalidate()
         stopMonitors()
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
     }
 
     private var currentExpandedSize: NSSize {
@@ -312,7 +464,7 @@ class BubbleWindow: NSPanel {
                 self.checkMousePosition()
             } else if event.type == .leftMouseDown && event.modifierFlags.contains(.option) {
                 self.mouseDownLocation = NSEvent.mouseLocation
-                self.dragStartPosition = self.currentPosition
+                self.dragStartOrigin = self.frame.origin
                 self.isDragging = false
             } else if event.type == .leftMouseDragged && event.modifierFlags.contains(.option) {
                 let currentLocation = NSEvent.mouseLocation
@@ -330,9 +482,28 @@ class BubbleWindow: NSPanel {
 
             return event
         }
+
+        // Typing anything in the expanded bubble pins it. This works on every
+        // site, including ones whose compose box the page script can't see.
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.isExpanded else { return event }
+            composeLog.debug("key in \(self.site.name, privacy: .public): sameWindow=\(event.window === self) key=\(self.isKeyWindow) appActive=\(NSApp.isActive)")
+            guard event.window === self else { return event }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let isEscape = event.keyCode == 53
+            let isShortcut = flags.contains(.command) && event.charactersIgnoringModifiers != "v"
+            if !isEscape && !isShortcut {
+                self.setComposing(true)
+            }
+            return event
+        }
     }
 
     private func stopMonitors() {
+        if let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
+        }
         if let monitor = globalMouseMonitor {
             NSEvent.removeMonitor(monitor)
             globalMouseMonitor = nil
@@ -379,6 +550,9 @@ class BubbleWindow: NSPanel {
 
     override func mouseEntered(with event: NSEvent) {
         guard !isExpanded && !isDragging && !isAnimating else { return }
+        // Passing over this bubble (say, on the way to a file picker) must not
+        // collapse a bubble that's pinned open mid-post
+        guard !BubbleManager.shared.hasPinnedBubble(except: self) else { return }
 
         hoverTimer?.invalidate()
         hoverTimer = Timer.scheduledTimer(withTimeInterval: BubbleWindow.hoverDelay, repeats: false) { [weak self] _ in
@@ -397,7 +571,7 @@ class BubbleWindow: NSPanel {
         hoverTimer = nil
 
         mouseDownLocation = NSEvent.mouseLocation
-        dragStartPosition = currentPosition
+        dragStartOrigin = frame.origin
 
         // Check if Option key is held for dragging expanded window
         let optionHeld = event.modifierFlags.contains(.option)
@@ -415,9 +589,8 @@ class BubbleWindow: NSPanel {
     override func mouseDragged(with event: NSEvent) {
         let optionHeld = event.modifierFlags.contains(.option)
 
-        // For collapsed: always allow drag
-        // For expanded: only with Option key
-        guard !isExpanded || optionHeld else { return }
+        // Collapsed bubbles move with the dock's grip; expanded ones move with Option
+        guard isExpanded && optionHeld else { return }
 
         let currentLocation = NSEvent.mouseLocation
         let distance = hypot(currentLocation.x - mouseDownLocation.x, currentLocation.y - mouseDownLocation.y)
@@ -437,43 +610,18 @@ class BubbleWindow: NSPanel {
         }
     }
 
+    /// Option-drag moves an expanded bubble freely, like its title bar; it
+    /// returns to its dock slot when it collapses.
     private func handleDrag() {
-        guard let screen = NSScreen.main else { return }
-
         let currentLocation = NSEvent.mouseLocation
-        let edge = SettingsStore.shared.preferredBubbleEdge
-        var newPosition: CGFloat
-
-        let windowHeight = isExpanded ? currentExpandedSize.height : BubbleWindow.collapsedSize.height
-        let windowWidth = isExpanded ? currentExpandedSize.width : BubbleWindow.collapsedSize.width
-
-        switch edge {
-        case .right:
-            let delta = currentLocation.y - mouseDownLocation.y
-            let availableHeight = screen.visibleFrame.height - windowHeight
-            if availableHeight > 0 {
-                newPosition = dragStartPosition + (delta / availableHeight)
-            } else {
-                newPosition = 0.5
-            }
-        case .bottom:
-            let delta = currentLocation.x - mouseDownLocation.x
-            let availableWidth = screen.visibleFrame.width - windowWidth
-            if availableWidth > 0 {
-                newPosition = dragStartPosition + (delta / availableWidth)
-            } else {
-                newPosition = 0.5
-            }
-        }
-
-        newPosition = max(0, min(1, newPosition))
-        currentPosition = newPosition
-        positionOnEdge(edge: edge, position: newPosition)
+        setFrameOrigin(NSPoint(
+            x: dragStartOrigin.x + currentLocation.x - mouseDownLocation.x,
+            y: dragStartOrigin.y + currentLocation.y - mouseDownLocation.y
+        ))
     }
 
     private func finishDrag() {
         isDragging = false
-        SettingsStore.shared.updateBubblePosition(id: site.id, position: currentPosition)
     }
 
     func expandFromHotCorner() {
@@ -490,30 +638,21 @@ class BubbleWindow: NSPanel {
 
         BubbleManager.shared.willExpandBubble(self)
 
-        if webViewController == nil {
-            webViewController = WebViewController()
-            webViewController?.onThemeColorDetected = { [weak self] color in
-                self?.bubbleContentView.titleBar?.updateBackgroundColor(color)
-            }
-            webViewController?.onFaviconLoaded = { [weak self] icon in
-                guard let self, self.site.customIcon == nil, let icon else { return }
-                // The page's own favicon is more reliable than URL guessing
-                icon.size = NSSize(width: 32, height: 32)
-                self.faviconImage = icon
-            }
-        }
+        seenUnreadCount = unreadCount
+        updateBadge()
+
+        ensureWebViewController()
         webViewController?.loadSite(site)
 
         isExpanded = true
         isAnimating = true
-
-        let edge = SettingsStore.shared.preferredBubbleEdge
+        hasShadow = true
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = BubbleWindow.animationDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
 
-            let expandedFrame = calculateExpandedFrame(edge: edge, position: currentPosition)
+            let expandedFrame = calculateExpandedFrame()
             self.animator().setFrame(expandedFrame, display: true)
         } completionHandler: { [weak self] in
             guard let self = self else { return }
@@ -540,6 +679,8 @@ class BubbleWindow: NSPanel {
 
         titleBar.onPinToggle = { [weak self] pinned in
             self?.isPinned = pinned
+            self?.isAutoPinned = false
+            self?.idleUnpinTimer?.invalidate()
         }
 
         titleBar.onUserAgentToggle = { [weak self] in
@@ -631,8 +772,9 @@ class BubbleWindow: NSPanel {
     private func performCollapse() {
         isExpanded = false
         isPinned = false
-
-        let edge = SettingsStore.shared.preferredBubbleEdge
+        isAutoPinned = false
+        idleUnpinTimer?.invalidate()
+        idleUnpinTimer = nil
 
         // Shrink the content first so the favicon frame is computed against
         // collapsed bounds, not the still-expanded ones
@@ -642,16 +784,20 @@ class BubbleWindow: NSPanel {
         } else {
             bubbleContentView.showFavicon(faviconImage ?? letterFallbackIcon())
         }
+        parkWebView()
+        updateBadge()
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = BubbleWindow.animationDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
 
-            let collapsedFrame = calculateCollapsedFrame(edge: edge, position: currentPosition)
+            let collapsedFrame = calculateCollapsedFrame()
             self.animator().setFrame(collapsedFrame, display: true)
         } completionHandler: { [weak self] in
             guard let self = self else { return }
             self.isAnimating = false
+            // Docked bubbles sit flat on the dock
+            self.hasShadow = self.site.hotCorner != nil
             if self.site.hotCorner != nil {
                 self.orderOut(nil)
             }
@@ -663,24 +809,45 @@ class BubbleWindow: NSPanel {
     private func scheduleUnloadIfNeeded() {
         unloadTimer?.invalidate()
         let minutes = SettingsStore.shared.bubbleUnloadMinutes
-        guard minutes > 0 else { return }
+        // Badges read the loaded page, so it has to stay loaded
+        guard minutes > 0, !SettingsStore.shared.showUnreadBadges else { return }
         unloadTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes) * 60, repeats: false) { [weak self] _ in
             guard let self, !self.isExpanded else { return }
+            self.webViewController?.view.removeFromSuperview()
             self.webViewController = nil
         }
     }
 
-    func positionOnEdge(edge: BubbleEdge, position: CGFloat) {
-        currentPosition = position
-        bubbleContentView.faviconPlacement = site.hotCorner.map { .corner($0) } ?? .edge(edge)
-        let newFrame = isExpanded
-            ? calculateExpandedFrame(edge: edge, position: position)
-            : calculateCollapsedFrame(edge: edge, position: position)
+    /// Puts the bubble in its dock slot. An expanded bubble stays where it
+    /// is and goes to the new slot when it collapses.
+    func dock(in slot: NSRect, edge: BubbleEdge) {
+        dockedFrame = slot
+        dockEdge = edge
+        bubbleContentView.faviconPlacement = .dock
+        hasShadow = false
+        guard !isExpanded, !isAnimating else { return }
+        setFrame(slot, display: true)
+        // Keep content in sync when the bubble size setting changes
+        bubbleContentView.frame = NSRect(origin: .zero, size: slot.size)
+        refreshFaviconLayout()
+    }
+
+    /// Hot corner bubbles sit in their corner instead of the dock.
+    func placeInCorner() {
+        guard let corner = site.hotCorner else { return }
+        dockedFrame = nil
+        bubbleContentView.faviconPlacement = .corner(corner)
+        hasShadow = true
+        guard !isExpanded, !isAnimating else { return }
+        let newFrame = calculateCollapsedFrame()
         setFrame(newFrame, display: true)
-        if !isExpanded {
-            // Keep content in sync when the bubble size setting changes
-            bubbleContentView.frame = NSRect(origin: .zero, size: newFrame.size)
-        }
+        bubbleContentView.frame = NSRect(origin: .zero, size: newFrame.size)
+        refreshFaviconLayout()
+    }
+
+    private func refreshFaviconLayout() {
+        guard !SettingsStore.shared.showBubblePreviews else { return }
+        bubbleContentView.showFavicon(faviconImage ?? letterFallbackIcon())
     }
 
     private func cornerFrame(size: NSSize, corner: HotCorner, visibleFrame: NSRect) -> NSRect {
@@ -688,53 +855,38 @@ class BubbleWindow: NSPanel {
         return NSIntegralRect(NSRect(x: x, y: visibleFrame.minY, width: size.width, height: size.height))
     }
 
-    private func calculateCollapsedFrame(edge: BubbleEdge, position: CGFloat) -> NSRect {
-        guard let screen = NSScreen.main else {
-            return NSRect(origin: .zero, size: BubbleWindow.collapsedSize)
-        }
-
-        if let corner = site.hotCorner {
-            return cornerFrame(size: BubbleWindow.collapsedSize, corner: corner, visibleFrame: screen.visibleFrame)
-        }
-
-        let visibleFrame = screen.visibleFrame
+    private func calculateCollapsedFrame() -> NSRect {
         let size = BubbleWindow.collapsedSize
-        var origin = NSPoint.zero
-
-        switch edge {
-        case .right:
-            origin.x = visibleFrame.maxX - size.width
-            origin.y = visibleFrame.origin.y + (visibleFrame.height - size.height) * position
-        case .bottom:
-            origin.x = visibleFrame.origin.x + (visibleFrame.width - size.width) * position
-            origin.y = visibleFrame.origin.y
+        if let corner = site.hotCorner, let screen = NSScreen.main {
+            return cornerFrame(size: size, corner: corner, visibleFrame: screen.visibleFrame)
         }
-
-        return NSIntegralRect(NSRect(origin: origin, size: size))
+        return dockedFrame ?? NSRect(origin: frame.origin, size: size)
     }
 
-    private func calculateExpandedFrame(edge: BubbleEdge, position: CGFloat) -> NSRect {
+    /// Opens flush against the dock's edge, centred on the bubble's slot.
+    private func calculateExpandedFrame() -> NSRect {
+        let size = currentExpandedSize
         guard let screen = NSScreen.main else {
-            return NSRect(origin: .zero, size: currentExpandedSize)
+            return NSRect(origin: .zero, size: size)
         }
+        let visible = screen.visibleFrame
 
         if let corner = site.hotCorner {
-            return cornerFrame(size: currentExpandedSize, corner: corner, visibleFrame: screen.visibleFrame)
+            return cornerFrame(size: size, corner: corner, visibleFrame: visible)
         }
 
-        let visibleFrame = screen.visibleFrame
-        let size = currentExpandedSize
+        let anchor = dockedFrame ?? frame
         var origin = NSPoint.zero
-
-        switch edge {
-        case .right:
-            origin.x = visibleFrame.maxX - size.width
-            origin.y = visibleFrame.origin.y + (visibleFrame.height - size.height) * position
-            origin.y = max(visibleFrame.origin.y, min(origin.y, visibleFrame.maxY - size.height))
-        case .bottom:
-            origin.y = visibleFrame.origin.y
-            origin.x = visibleFrame.origin.x + (visibleFrame.width - size.width) * position
-            origin.x = max(visibleFrame.origin.x, min(origin.x, visibleFrame.maxX - size.width))
+        switch dockEdge {
+        case .right: origin.x = visible.maxX - size.width
+        case .left: origin.x = visible.minX
+        case .top: origin.y = visible.maxY - size.height
+        case .bottom: origin.y = visible.minY
+        }
+        if dockEdge.isVertical {
+            origin.y = max(visible.minY, min(anchor.midY - size.height / 2, visible.maxY - size.height))
+        } else {
+            origin.x = max(visible.minX, min(anchor.midX - size.width / 2, visible.maxX - size.width))
         }
 
         return NSIntegralRect(NSRect(origin: origin, size: size))
@@ -749,12 +901,18 @@ class BubbleWindow: NSPanel {
         unloadTimer = nil
         stopMonitors()
         removeResizeHandles()
+        webViewController?.view.removeFromSuperview()
         webViewController = nil
         previewWebView = nil
     }
 
     func refreshCollapsedContent() {
         guard !isExpanded else { return }
+        defer { updateBadge() }
+        // Turning badges on brings back a page that was unloaded to save memory
+        if SettingsStore.shared.showUnreadBadges, webViewController == nil {
+            preloadPage()
+        }
 
         if SettingsStore.shared.showBubblePreviews {
             if let snapshot = snapshotImage {

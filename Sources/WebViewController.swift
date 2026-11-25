@@ -1,5 +1,8 @@
 import Cocoa
 import WebKit
+import os
+
+let badgeLog = Logger(subsystem: "com.itsypin.app", category: "badges")
 
 // MARK: - Resize Corner Enum
 
@@ -194,6 +197,16 @@ class WebViewController: NSViewController, WKUIDelegate, WKNavigationDelegate, W
     var onResize: ((NSSize) -> Void)?
     var onFaviconLoaded: ((NSImage?) -> Void)?
     var onThemeColorDetected: ((NSColor) -> Void)?
+    /// Fires when the page goes from "nothing typed" to "something typed" in a
+    /// text box (true) or back to empty, e.g. after posting (false).
+    var onComposeStateChanged: ((Bool) -> Void)?
+    /// Fires when the page opens the native file picker (image uploads).
+    var onFilePickerOpened: (() -> Void)?
+    private(set) var hasComposeDraft = false
+    /// Fires when the page's unread count (notifications, messages) changes.
+    var onUnreadCountChanged: ((Int) -> Void)?
+    private(set) var unreadCount = 0
+    private var titleObservation: NSKeyValueObservation?
 
     private static let dragScrollJS = """
     (function() {
@@ -252,6 +265,101 @@ class WebViewController: NSViewController, WKUIDelegate, WKNavigationDelegate, W
     }, true);
     """
 
+    // Watches compose boxes (textareas and contenteditables, not search inputs).
+    // The starting state is recorded silently so pages that load with text
+    // already in a box don't count as the user typing.
+    private static let composeWatcherJS = """
+    (function() {
+        if (window.__itsypinCompose) return;
+        window.__itsypinCompose = true;
+        function hasDraft() {
+            var els = document.querySelectorAll('textarea, [contenteditable="true"], [contenteditable=""], [role="textbox"]');
+            for (var i = 0; i < els.length; i++) {
+                var el = els[i];
+                var value = el.tagName === 'TEXTAREA' ? el.value : el.innerText;
+                if (value && value.trim().length > 0) return true;
+            }
+            return false;
+        }
+        var last = hasDraft();
+        function report() {
+            var now = hasDraft();
+            if (now === last) return;
+            last = now;
+            try { window.webkit.messageHandlers.composeState.postMessage(now); } catch (e) {}
+        }
+        document.addEventListener('input', report, true);
+        setInterval(report, 1500);
+
+        // Every keystroke or paste in a text box says "typing", even when the
+        // box already had text (a restored draft), which the state above misses
+        function isEditable(el) {
+            return el && (el.tagName === 'TEXTAREA' || el.isContentEditable ||
+                (el.getAttribute && el.getAttribute('role') === 'textbox'));
+        }
+        var lastTyping = 0;
+        function typing(e) {
+            if (!isEditable(e.target)) return;
+            var now = Date.now();
+            if (now - lastTyping < 800) return;
+            lastTyping = now;
+            try { window.webkit.messageHandlers.composeTyping.postMessage(true); } catch (err) {}
+        }
+        document.addEventListener('keydown', typing, true);
+        document.addEventListener('paste', typing, true);
+    })();
+    """
+
+    // Reads the page's unread count. Most sites (X, LinkedIn) put it in the
+    // tab title, as "(3) Home / X"; X's and Threads' notifications nav links
+    // are read when the title has none. Reports only changes, plus the first reading.
+    private static let unreadWatcherJS = """
+    (function() {
+        if (window.__itsypinBadge) return;
+        window.__itsypinBadge = true;
+        function fromTitle() {
+            var m = /^\\s*\\((\\d+)\\+?\\)/.exec(document.title || '');
+            return m ? parseInt(m[1], 10) : null;
+        }
+        function fromX() {
+            if (!/(^|\\.)(x|twitter)\\.com$/.test(location.hostname)) return null;
+            var link = document.querySelector('a[data-testid="AppTabBar_Notifications_Link"]');
+            if (!link) return null;
+            var labels = [link].concat(Array.prototype.slice.call(link.querySelectorAll('[aria-label]')));
+            for (var i = 0; i < labels.length; i++) {
+                var m = /(\\d+)\\+?\\s+unread/i.exec(labels[i].getAttribute('aria-label') || '');
+                if (m) return parseInt(m[1], 10);
+            }
+            return 0;
+        }
+        // Threads has no count in its title; a number inside its
+        // Notifications (/activity) nav link is the only signal
+        function fromThreads() {
+            if (!/(^|\\.)threads\\.(com|net)$/.test(location.hostname)) return null;
+            var link = document.querySelector('a[href="/activity"]');
+            if (!link) return null;
+            var m = /(\\d+)/.exec((link.getAttribute('aria-label') || '') + ' ' + (link.innerText || ''));
+            return m ? parseInt(m[1], 10) : 0;
+        }
+        var last = -1;
+        function check() {
+            var source = 'title';
+            var n = fromTitle();
+            if (n === null) { n = fromX(); source = 'nav'; }
+            if (n === null) { n = fromThreads(); source = 'nav'; }
+            if (n === null) { n = 0; source = 'none'; }
+            if (n === last) return;
+            last = n;
+            try { window.webkit.messageHandlers.unreadCount.postMessage({count: n, source: source}); } catch (e) {}
+        }
+        window.__itsypinBadgeCheck = check;
+        var titleEl = document.querySelector('title');
+        if (titleEl) new MutationObserver(check).observe(titleEl, {childList: true, characterData: true, subtree: true});
+        setInterval(check, 5000);
+        check();
+    })();
+    """
+
     override func loadView() {
         containerView = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 650))
         containerView.wantsLayer = true
@@ -267,12 +375,27 @@ class WebViewController: NSViewController, WKUIDelegate, WKNavigationDelegate, W
         config.userContentController.addUserScript(contextMenuScript)
         config.userContentController.add(WeakScriptMessageHandler(self), name: "contextMenuLink")
 
+        let composeScript = WKUserScript(source: Self.composeWatcherJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+        config.userContentController.addUserScript(composeScript)
+        config.userContentController.add(WeakScriptMessageHandler(self), name: "composeState")
+        config.userContentController.add(WeakScriptMessageHandler(self), name: "composeTyping")
+
+        let unreadScript = WKUserScript(source: Self.unreadWatcherJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+        config.userContentController.addUserScript(unreadScript)
+        config.userContentController.add(WeakScriptMessageHandler(self), name: "unreadCount")
+
         webView = ContextMenuWebView(frame: containerView.bounds, configuration: config)
         webView.autoresizingMask = [.width, .height]
         webView.uiDelegate = self
         webView.navigationDelegate = self
         webView.allowsMagnification = true
         containerView.addSubview(webView)
+
+        // Page timers can be throttled while the bubble is collapsed; a title
+        // change is pushed from WebKit, so check the count on every one
+        titleObservation = webView.observe(\.title, options: [.new]) { webView, _ in
+            webView.evaluateJavaScript("window.__itsypinBadgeCheck && window.__itsypinBadgeCheck()", completionHandler: nil)
+        }
 
         loadingOverlay = NSView(frame: containerView.bounds)
         loadingOverlay.autoresizingMask = [.width, .height]
@@ -338,6 +461,20 @@ class WebViewController: NSViewController, WKUIDelegate, WKNavigationDelegate, W
         currentLoadedKey = newKey
         currentSiteHost = url.host
         webView.load(URLRequest(url: url))
+    }
+
+    /// Loads a one-off URL (such as a compose link) without changing which
+    /// site this controller holds, so reopening the bubble doesn't reload home.
+    func load(_ url: URL) {
+        _ = self.view
+        showLoading()
+        webView.load(URLRequest(url: url))
+    }
+
+    /// Refreshes the page in the background, unless something is being typed.
+    func reloadIfIdle() {
+        guard currentLoadedKey != nil, !hasComposeDraft else { return }
+        webView.reload()
     }
 
     private func showLoading() {
@@ -435,6 +572,8 @@ class WebViewController: NSViewController, WKUIDelegate, WKNavigationDelegate, W
 
     func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+        composeLog.notice("file picker opened")
+        onFilePickerOpened?()
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = parameters.allowsDirectories
@@ -448,6 +587,27 @@ class WebViewController: NSViewController, WKUIDelegate, WKNavigationDelegate, W
     // MARK: - WKScriptMessageHandler
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "composeTyping" {
+            composeLog.notice("page typing on \(self.webView.url?.host ?? "?", privacy: .public)")
+            onComposeStateChanged?(true)
+            return
+        }
+        if message.name == "unreadCount" {
+            let body = message.body as? [String: Any]
+            let count = (body?["count"] as? NSNumber)?.intValue ?? 0
+            let source = body?["source"] as? String ?? "?"
+            badgeLog.notice("unread \(count) via \(source, privacy: .public) on \(self.webView.url?.host ?? "?", privacy: .public)")
+            unreadCount = count
+            onUnreadCountChanged?(count)
+            return
+        }
+        if message.name == "composeState" {
+            let composing = message.body as? Bool ?? false
+            composeLog.notice("page compose state \(composing) on \(self.webView.url?.host ?? "?", privacy: .public)")
+            hasComposeDraft = composing
+            onComposeStateChanged?(composing)
+            return
+        }
         guard message.name == "contextMenuLink" else { return }
         let href = message.body as? String ?? ""
         webView.contextMenuLinkURL = URL(string: href)

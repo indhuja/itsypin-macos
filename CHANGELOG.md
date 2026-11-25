@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### New
+
+- **Post composer** (⌃⌥P or "New Post…" in the menu): an X-style compose box with per-platform character counters for X, Threads, LinkedIn and Bluesky. "Post to X" opens the site's own compose box, already filled in, inside its bubble. You review it and press Post.
+- **Drafts as markdown**: every draft autosaves to `Drafts/` in a folder you choose (point it into your Obsidian vault), moves to `Posted/` once sent everywhere, and images go in `attachments/` as `![[…]]` embeds.
+- **Images in the composer**: paste, drop or pick images. The first image is copied when sending, and thumbnails can be dragged into the site's compose box.
+- **Auto-pin**: a bubble or popover stays open while you type in a text box or the file picker is open, and releases once the box is cleared after posting, or after 2 minutes without typing.
+- **Quick add** for X, Threads, LinkedIn and Bluesky bubbles in Settings → Posting.
+
+### Changed
+
+- **Bubble dock**: bubbles now sit together in one grey tab that curves out of the screen edge. Drag its grip (the six dots) to any edge, top and left included; it snaps to the nearest edge and remembers where you left it. Dragging a single bubble no longer moves it.
+- **Appearance** setting (System, Light, Dark) for the dock, bubbles and settings.
+- Bubble pages now load at launch, so the first hover shows a ready page, and they refresh in the background after the Mac wakes, unless something is half-typed.
+
 ## 2.0.0 – 2026-07-02
 
 Pinster is now **Itsypin** – new name, new bundle id (`com.itsypin.app`), same app. Settings from previous Pinster installs migrate automatically.

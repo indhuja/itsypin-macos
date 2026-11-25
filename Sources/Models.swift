@@ -75,6 +75,25 @@ enum DisplayMode: String, Codable, CaseIterable {
 enum BubbleEdge: String, Codable, CaseIterable {
     case right
     case bottom
+    case left
+    case top
+
+    /// Left and right docks run up and down the screen.
+    var isVertical: Bool { self == .left || self == .right }
+}
+
+enum AppAppearance: String, Codable, CaseIterable {
+    case system
+    case light
+    case dark
+
+    var nsAppearance: NSAppearance? {
+        switch self {
+        case .system: return nil
+        case .light: return NSAppearance(named: .aqua)
+        case .dark: return NSAppearance(named: .darkAqua)
+        }
+    }
 }
 
 enum HotCorner: String, Codable, CaseIterable {
